@@ -594,10 +594,12 @@ contract SpringXPointFixedAPYFarm is Initializable, OwnableUpgradeable, Pausable
         pool.lastRewardTime = uint64(block.timestamp);
     }
 
-    /// @dev Ensure user's reward debt, accrued, and claimed arrays are aligned with pool reward count.
+    // @dev Ensure user's reward debt, accrued, and claimed arrays are aligned with pool reward count.
     ///      Called before any user operation to handle newly added rewards gracefully.
-    ///      New entries are initialized to 0, meaning users don't earn retroactive rewards
-    ///      for tokens added after they deposited — they start earning from their next interaction.
+    ///      New entries are initialized to 0 (not the current rateIntegral), so already-staked users
+    ///      earn from the time the reward was added — not retroactively before it existed, and not
+    ///      delayed until their next interaction. This is the fair behavior: users who were staked
+    ///      when a new reward went live receive rewards for that entire period.
     function _syncUserArrays(uint256 poolId_, address user_) internal {
         uint256 count = poolRewards[poolId_].length;
         uint256[] storage debts = userRewardDebts[poolId_][user_];
