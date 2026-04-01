@@ -55,6 +55,9 @@ contract SpringXVault is IVault, Initializable, OwnableUpgradeable, ReentrancyGu
     /// @notice Maps user addresses to their deposit information.
     mapping(address => VaultUserInfo) public userInfoMap;
 
+    /// @dev Reserved storage gap for future upgrades (50 slots)
+    uint256[50] private __gap;
+
     // ──────────────────────────────────────────────
     //  Events
     // ──────────────────────────────────────────────
@@ -80,6 +83,11 @@ contract SpringXVault is IVault, Initializable, OwnableUpgradeable, ReentrancyGu
 
     /// @notice Emitted when the owner updates the vault's asset token.
     event SetAssets(address indexed _assetsAddr);
+
+    /// constructor
+    constructor() {
+        _disableInitializers();
+    }
 
     // ──────────────────────────────────────────────
     //  Initialization
@@ -114,18 +122,32 @@ contract SpringXVault is IVault, Initializable, OwnableUpgradeable, ReentrancyGu
     ///      Setting strategy to address(0) detaches any existing strategy.
     /// @param _strategy The new strategy contract (or address(0) to detach).
     function setVaultStrategy(IStrategy _strategy) external onlyOwner {
+        IStrategy oldStrategy = strategy;
+
+        // Recall funds and revoke approval from old strategy before replacing.
+        if (address(oldStrategy) != address(0)) {
+            if (address(assets) != nativeAddress) {
+                uint256 oldBal = oldStrategy.balanceOf();
+                if (oldBal > 0) {
+                    oldStrategy.withdraw(address(this), oldBal);
+                }
+                IERC20(assets).forceApprove(address(oldStrategy), 0);
+            } else {
+                uint256 oldBal = oldStrategy.balanceOf();
+                if (oldBal > 0) {
+                    oldStrategy.withdrawNative(address(this), oldBal);
+                }
+            }
+        }
+
         strategy = _strategy;
 
         if (address(_strategy) != address(0)) {
             if (address(assets) != nativeAddress) {
-                // Reset approval to 0 first (required by some tokens like USDT),
-                // then approve max amount for the strategy to pull tokens.
-                IERC20(assets).approve(address(_strategy), 0);
-                IERC20(assets).approve(address(_strategy), type(uint256).max);
-                // Transfer all existing vault ERC20 balance to the new strategy.
+                // forceApprove handles non-bool-returning tokens (e.g. USDT0)
+                IERC20(assets).forceApprove(address(_strategy), type(uint256).max);
                 transferERC20ToStrategy();
             } else {
-                // Transfer all existing native currency to the new strategy.
                 transferNativeToStrategy();
             }
         }
@@ -144,6 +166,7 @@ contract SpringXVault is IVault, Initializable, OwnableUpgradeable, ReentrancyGu
     /// @notice Updates the sentinel address used to identify native currency operations.
     /// @param _coreAddress The new native currency sentinel address.
     function setCoreAddress(address _coreAddress) external onlyOwner {
+        require(totalAssets == 0, "Cannot change mode with active deposits");
         nativeAddress = _coreAddress;
 
         emit SetCoreAddress(_coreAddress);
@@ -152,6 +175,7 @@ contract SpringXVault is IVault, Initializable, OwnableUpgradeable, ReentrancyGu
     /// @notice Updates the ERC20 asset token managed by this vault.
     /// @param _assets The new asset token address.
     function setAssets(IERC20 _assets) external onlyOwner {
+        require(totalAssets == 0, "Cannot change asset with active deposits");
         assets = _assets;
 
         emit SetAssets(address(_assets));
@@ -166,6 +190,9 @@ contract SpringXVault is IVault, Initializable, OwnableUpgradeable, ReentrancyGu
     ///      Useful for checking immediately available liquidity.
     /// @return The amount of assets held directly by the vault contract.
     function vaultBalance() external view returns (uint256) {
+        if (address(assets) == nativeAddress) {
+            return address(this).balance;
+        }
         return assets.balanceOf(address(this));
     }
 
