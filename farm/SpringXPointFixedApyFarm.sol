@@ -327,6 +327,9 @@ contract SpringXPointFixedAPYFarm is Initializable, OwnableUpgradeable, Pausable
         // Effects — update state before external calls (CEI pattern)
         user.amount -= amount_;
         pool.totalStaked -= amount_;
+        if (user.amount == 0) {
+            poolUsers[poolId_].remove(msg.sender);
+        }
         _updateAllRewardDebts(poolId_, msg.sender);
 
         // Interactions — distribute accrued rewards, then withdraw from vault
@@ -343,16 +346,19 @@ contract SpringXPointFixedAPYFarm is Initializable, OwnableUpgradeable, Pausable
         if (!pools[poolId_].exists) revert PoolNotExist();
 
         UserInfo storage user = userInfos[poolId_][msg.sender];
-        if (user.amount == 0) revert NoStake();
 
         _updatePool(poolId_);
         _syncUserArrays(poolId_, msg.sender);
 
-        // Settle pending into accrued
-        _settleUser(poolId_, msg.sender);
-        _updateAllRewardDebts(poolId_, msg.sender);
+        // Settle pending into accrued only if user has active stake.
+        // Zero-stake users may still have undistributed accrued from a prior
+        // withdraw when the Farm was underfunded.
+        if (user.amount > 0) {
+            _settleUser(poolId_, msg.sender);
+            _updateAllRewardDebts(poolId_, msg.sender);
+        }
 
-        // Check if any accrued rewards exist
+        // Check if any accrued rewards exist (works for both staked and zero-stake users)
         uint256[] storage accrued = userAccrued[poolId_][msg.sender];
         bool hasReward;
         for (uint256 i = 0; i < accrued.length;) {
@@ -388,6 +394,7 @@ contract SpringXPointFixedAPYFarm is Initializable, OwnableUpgradeable, Pausable
         // Effects — zero out all user state, forfeit rewards
         user.amount = 0;
         pool.totalStaked -= amount;
+        poolUsers[poolId_].remove(msg.sender);
 
         // Set debts to current integral (NOT zero) so that if the user re-deposits,
         // they start earning from the current point, not from integral=0.
@@ -525,6 +532,12 @@ contract SpringXPointFixedAPYFarm is Initializable, OwnableUpgradeable, Pausable
     function getPoolTVL(uint256 poolId_) public view returns (uint256) {
         if (!pools[poolId_].exists) revert PoolNotExist();
         return pools[poolId_].vault.balance();
+    }
+
+    /// @notice Get pool user-deposited principal only (excludes yield and unsolicited transfers)
+    function getPoolDeposits(uint256 poolId_) public view returns (uint256) {
+        if (!pools[poolId_].exists) revert PoolNotExist();
+        return pools[poolId_].totalStaked;
     }
 
     /// @notice Get TVL for all pools
@@ -690,14 +703,21 @@ contract SpringXPointFixedAPYFarm is Initializable, OwnableUpgradeable, Pausable
                     pointToken.mint(user_, amount);
                     emit Harvested(poolId_, user_, rewards[i].token, amount);
                 } else {
-                    // Non-mintable: check Farm balance before transfer
-                    // If insufficient, keep in accrued — user can harvest later when funded
+                    // Non-mintable: check Farm balance before transfer.
+                    // If insufficient, keep in accrued — user can harvest later when funded.
                     uint256 farmBalance = IERC20(rewards[i].token).balanceOf(address(this));
                     if (farmBalance >= amount) {
-                        accrued[i] = 0;
-                        claimed[i] += amount;
-                        IERC20(rewards[i].token).safeTransfer(user_, amount);
-                        emit Harvested(poolId_, user_, rewards[i].token, amount);
+                        // Use low-level call to prevent revert on blacklisted/paused tokens,
+                        // so reward transfer failure does not block deposit/withdraw operations.
+                        (bool success, bytes memory returnData) = address(rewards[i].token).call(
+                            abi.encodeCall(IERC20.transfer, (user_, amount))
+                        );
+                        if (success && (returnData.length == 0 || abi.decode(returnData, (bool)))) {
+                            accrued[i] = 0;
+                            claimed[i] += amount;
+                            emit Harvested(poolId_, user_, rewards[i].token, amount);
+                        }
+                        // Transfer failed (blacklist/pause): keep in accrued for later retry
                     }
                     // Insufficient balance: silently keep in accrued, no revert
                 }
