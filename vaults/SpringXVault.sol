@@ -158,6 +158,7 @@ contract SpringXVault is IVault, Initializable, OwnableUpgradeable, ReentrancyGu
     /// @notice Updates the mainChef address that is authorized to call deposit/withdraw.
     /// @param _mainChef The new mainChef contract address.
     function setMainChef(address _mainChef) external onlyOwner {
+        require(totalAssets == 0, "cannot change mainChef with active deposits");
         mainChef = _mainChef;
 
         emit SetMainChef(address(_mainChef));
